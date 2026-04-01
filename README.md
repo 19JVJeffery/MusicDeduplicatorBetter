@@ -1,91 +1,183 @@
-# Music Deduplication Tool
+# Music Deduplicator
 
-## Overview
+A Python tool that finds and removes duplicate audio files from your music library. It uses **audio fingerprinting** (via [AcoustID](https://acoustid.org/)) plus fuzzy metadata matching to identify duplicates — even when file names or tags differ.
 
-The **Music Deduplication Tool** is a Python script designed to help you manage and clean up your music library by identifying and handling duplicate audio files. It scans your music directories, detects duplicates using metadata analysis and audio fingerprinting with AcoustID, and allows you to either list, move, or delete the duplicates based on your preference.
+It ships with an **interactive TUI** (terminal user interface) that guides you step-by-step through scanning, reviewing, and acting on duplicates, as well as a fully-featured **CLI** for scripting and automation.
+
+---
 
 ## Features
 
-- **Metadata Analysis with Fuzzy Matching**: Quickly identifies potential duplicates by comparing metadata (artist, title, album) using fuzzy string matching.
-- **Audio Fingerprinting with AcoustID**: Utilizes AcoustID and the Chromaprint library to accurately identify audio duplicates, even if file metadata differs or is missing.
-- **Batch Processing**: Processes directories in configurable batches (default 1000) to optimize resource usage and prevent system overload.
-- **Multiprocessing Support**: Uses a process pool (capped at 2 workers to respect API rate limits) to speed up directory scanning. Can be disabled with `--no-multiprocessing`.
-- **Progress Bar**: Displays real-time progress bars using `tqdm` when `--verbose` is enabled.
-- **Caching Mechanism**: Caches file metadata and AcoustID fingerprints in a local SQLite database (`file_cache.db`) to improve performance on subsequent runs.
-- **Customizable Actions**: Supports listing, moving, or deleting duplicates based on user selection.
-- **Logging Functionality**: Detailed logging with configurable log levels, stored in `music_deduplicate.log`.
-- **Configurable Parameters**: Batch size, fuzzy match threshold, and other settings are configurable via `config.json`.
-- **Dry Run Mode**: Test what would happen without modifying any files using `--dry-run`.
-- **Safety Confirmation**: Destructive `delete` action requires confirmation (bypass with `--yes`).
+- **Interactive TUI** — guided workflow with progress bars, live log, and duplicate review before any action is taken.
+- **Audio fingerprinting** — identifies duplicates regardless of file name or metadata using AcoustID/Chromaprint.
+- **Fuzzy metadata matching** — fast pre-screening via artist/title/album similarity.
+- **Three actions**: list (safe), move, or delete duplicates.
+- **Dry-run mode** — preview what would happen without touching any files.
+- **Caching** — fingerprints and metadata are cached in a local SQLite database, making repeat scans much faster.
+- **Multiprocessing** — optional parallel directory hashing (capped at 2 workers to respect API rate limits).
+- **Batch processing** — configurable batch size prevents excessive memory use on large libraries.
+- **Safety prompts** — destructive delete requires an explicit confirmation step.
+- **Detailed logging** — full log written to `music_deduplicate.log`.
+
+---
+
+## Requirements
+
+- **Python 3.8 or higher**
+- **pip**
+- **fpcalc** (Chromaprint) — for audio fingerprinting
+- **ffmpeg** — required by Chromaprint on some systems
+- An **AcoustID API key** (free) — for fingerprint lookups
+
+---
 
 ## Installation
 
-### Prerequisites
+### 1 — Install system dependencies
 
-- **Python 3.6 or higher**
-- **pip** (Python package installer)
-
-### Required Python Libraries
-
-Install the required Python libraries using pip:
-
-```bash
-pip install -r requirements.txt
-```
-
-Or install manually:
-
-```bash
-pip install acoustid mutagen fuzzywuzzy[speedup] tqdm pyacoustid ratelimit
-```
-
-- **acoustid**: For audio fingerprinting and AcoustID API interaction.
-- **mutagen**: For reading and writing audio metadata.
-- **fuzzywuzzy**: For fuzzy string matching in metadata comparison.
-- **python-Levenshtein**: Installed with `[speedup]` option for faster fuzzy matching.
-- **tqdm**: For displaying progress bars.
-- **ratelimit**: For rate limiting AcoustID API calls.
-
-### System Dependencies
-
-Install the following system dependencies:
-
-On Debian/Ubuntu-based systems:
+**Debian / Ubuntu:**
 
 ```bash
 sudo apt-get update
 sudo apt-get install ffmpeg libchromaprint-tools
 ```
 
-- **ffmpeg**: Provides audio decoding capabilities required by some audio processing libraries.
-- **libchromaprint-tools**: Provides `fpcalc`, required by AcoustID for fingerprinting.
-
-On macOS using Homebrew:
+**macOS (Homebrew):**
 
 ```bash
 brew install ffmpeg chromaprint
 ```
 
+**Windows:**
+
+1. Download and install [FFmpeg](https://ffmpeg.org/download.html).
+2. Download [fpcalc](https://acoustid.org/chromaprint) and place it somewhere on your `PATH`.
+
+Verify `fpcalc` is available:
+
+```bash
+fpcalc -version
+```
+
+### 2 — Clone the repository
+
+```bash
+git clone https://github.com/19JVJeffery/MusicDeduplicatorBetter.git
+cd MusicDeduplicatorBetter
+```
+
+### 3 — Install Python dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+> **Tip:** Use a virtual environment to keep dependencies isolated:
+>
+> ```bash
+> python3 -m venv .venv
+> source .venv/bin/activate   # Windows: .venv\Scripts\activate
+> pip install -r requirements.txt
+> ```
+
+### 4 — Obtain an AcoustID API key
+
+1. Register at <https://acoustid.org/api-key>.
+2. Copy your key — you will be prompted for it the first time you run the tool, or you can add it to `config.json` manually (see *Configuration* below).
+
+---
+
+## Running the TUI (recommended)
+
+Simply run the script with no arguments to launch the interactive terminal UI:
+
+```bash
+python3 musicorganise.py
+```
+
+Or launch the TUI directly:
+
+```bash
+python3 music_tui.py
+```
+
+The TUI walks you through:
+
+1. **Setup** — choose your music directory, action, and options.
+2. **Settings** — enter/update your AcoustID API key and thresholds.
+3. **Scanning** — live progress bar and log while the library is fingerprinted.
+4. **Review** — inspect every duplicate set before any action is taken.
+5. **Processing** — apply the chosen action with real-time progress.
+6. **Summary** — see how many files were processed and storage reclaimed.
+
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `q` | Quit |
+| `Ctrl+C` | Quit |
+
+---
+
+## CLI Usage
+
+Pass at least `--path` and `--action` to skip the TUI and run non-interactively:
+
+```bash
+python3 musicorganise.py --path "/path/to/music" --action ACTION [OPTIONS]
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `-p, --path PATH` | **(Required)** Music directory to scan. |
+| `-a, --action ACTION` | **(Required)** `list`, `move`, or `delete`. |
+| `-m, --move-dir DIR` | Destination for moved files (required when `--action move`). |
+| `-v, --verbose` | Show tqdm progress bars in the terminal. |
+| `--log-level LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` (default: `INFO`). |
+| `--no-multiprocessing` | Disable parallel hashing (useful for debugging). |
+| `--dry-run` | Preview what would happen without modifying any files. |
+| `--clear-cache` | Wipe the fingerprint cache before running. |
+| `-y, --yes` | Skip the delete-confirmation prompt. |
+
+### Examples
+
+**List duplicates (safe, no changes):**
+
+```bash
+python3 musicorganise.py --path "/media/music" --action list --verbose
+```
+
+**Move duplicates to another folder:**
+
+```bash
+python3 musicorganise.py --path "/media/music" --action move --move-dir "/media/duplicates" --verbose
+```
+
+**Dry-run delete (preview only):**
+
+```bash
+python3 musicorganise.py --path "/media/music" --action delete --dry-run --verbose
+```
+
+**Delete duplicates (with confirmation prompt):**
+
+```bash
+python3 musicorganise.py --path "/media/music" --action delete --verbose
+```
+
+**Delete without confirmation (automation/scripting):**
+
+```bash
+python3 musicorganise.py --path "/media/music" --action delete --yes
+```
+
+---
+
 ## Configuration
 
-### Obtain an AcoustID API Key
-
-To use the audio fingerprinting feature, you need an AcoustID API key:
-
-1. Register for a free API key at AcoustID API Key Registration.
-2. The script will prompt you for the API key on the first run and store it in `config.json`.
-
-### Configure Settings
-
-The script uses a configuration file `config.json` to store settings:
-
-- **Fuzzy Match Threshold**: Determines how closely metadata must match to be considered duplicates (default is 90).
-- **Batch Size**: Number of directories processed in each batch (default is 1000).
-- **Supported Extensions**: Audio file formats to scan (default: `.mp3`, `.flac`, `.ogg`, `.wav`, `.m4a`, `.aac`).
-
-These settings can be modified directly in `config.json` or will be prompted during the first run if not present.
-
-Example `config.json`:
+Settings are stored in `config.json` in the script directory. The file is created automatically the first time you run the tool.
 
 ```json
 {
@@ -96,140 +188,91 @@ Example `config.json`:
 }
 ```
 
-## Usage
+| Key | Default | Description |
+|-----|---------|-------------|
+| `acoustid_api_key` | — | Your AcoustID API key. |
+| `fuzzy_threshold` | `90` | Metadata similarity score (0–100) above which files are considered potential duplicates. |
+| `batch_size` | `1000` | Number of directories processed per batch. Reduce if you hit "too many open files" errors. |
+| `supported_extensions` | see above | Audio formats to scan. |
 
-### Running the Script
+> **Security note:** `config.json` is listed in `.gitignore` to prevent your API key from being committed.
 
-Basic command structure:
-
-```bash
-python3 musicorganise.py --path "/path/to/music" --action ACTION [options]
-```
-
-### Command-Line Options
-
-- `-p, --path`: (Required) Path to the music directory to scan.
-- `-a, --action`: (Required) Action to take on duplicates. Choices are:
-  - `list`: List duplicates without making any changes.
-  - `move`: Move duplicates to a specified directory.
-  - `delete`: Delete duplicate files permanently.
-- `-m, --move-dir`: (Required if action is `move`) Directory to move duplicates to.
-- `-v, --verbose`: Enable verbose output with progress bars.
-- `-y, --yes`: Skip confirmation prompt for destructive actions.
-- `--log-level`: Set the logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). Default is `INFO`.
-- `--no-multiprocessing`: Disable multiprocessing for debugging purposes.
-- `--dry-run`: Perform a test run without modifying any files.
-- `--clear-cache`: Clear the cache database before running.
-
-### Examples
-
-List duplicates with progress bar:
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action list --verbose
-```
-
-Move duplicates to a directory:
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action move --move-dir "/media/music/Duplicates" --verbose
-```
-
-Delete duplicates with detailed logging:
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action delete --verbose --log-level DEBUG
-```
-
-Dry run (preview what would happen):
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action delete --dry-run --verbose
-```
-
-Disabling multiprocessing:
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action list --no-multiprocessing --verbose
-```
-
-Adjusting batch size via `config.json`:
-
-```json
-{
-    "batch_size": 500
-}
-```
+---
 
 ## How It Works
 
-1. **File Scanning**: The script recursively scans the specified music directory for supported audio file formats (`.mp3`, `.flac`, `.ogg`, `.wav`, `.m4a`, `.aac`).
+1. **File scanning** — walks the specified directory tree and collects every supported audio file.
+2. **Metadata extraction** — reads artist, title, album, track number, and file size using *mutagen*.
+3. **Audio fingerprinting** — runs `fpcalc` to generate a Chromaprint fingerprint, then looks it up via the AcoustID API to obtain a stable recording ID.
+4. **Directory hashing** — each directory's recording IDs (or metadata as a fallback) are concatenated and hashed with SHA-256. Directories with the same hash are flagged as duplicates.
+5. **Duplicate resolution** — for each duplicate set the "best" copy is kept (FLAC preferred; otherwise largest total size). The other copies are listed, moved, or deleted. Intra-directory duplicates (same AcoustID within a single folder) are also resolved by keeping the highest-quality format.
+6. **Caching** — results are stored in `file_cache.db` keyed by file path and mtime, so unchanged files are not re-fingerprinted on subsequent runs.
 
-2. **Metadata Extraction**: For each file, it extracts metadata such as artist, title, album, and track number using `mutagen`.
-
-3. **Audio Fingerprinting**: It generates an audio fingerprint using `fpcalc` and retrieves an AcoustID recording ID via the AcoustID API.
-
-4. **Directory Hashing**: Each directory's contents are hashed using AcoustID recording IDs (with metadata as a fallback). Directories with identical hashes are flagged as duplicates.
-
-5. **Duplicate Resolution**:
-   - **Inter-directory**: The best directory is kept (prioritizing FLAC files, then largest total size). Other directories are listed, moved, or deleted.
-   - **Intra-directory**: Within the kept directory, files with the same AcoustID are identified and resolved (keeping the highest quality format).
-
-6. **Caching**: The script caches metadata and AcoustID results in a local SQLite database (`file_cache.db`) to improve performance on subsequent runs. Cache entries are validated against file modification times.
-
-7. **Logging and Progress**: Detailed logs are recorded in `music_deduplicate.log`, and progress bars are displayed when `--verbose` is enabled.
+---
 
 ## Logging
 
-- **Log File**: Logs are saved to `music_deduplicate.log` in the script's directory.
-- **Log Levels**: Configurable via `--log-level`. Levels include `DEBUG`, `INFO`, `WARNING`, `ERROR`, and `CRITICAL`.
+- Logs are written to `music_deduplicate.log` in the script directory.
+- The log level can be changed with `--log-level`.
+- The TUI also shows a live in-app log during scanning and processing.
 
-Example command to set log level to DEBUG:
+---
+
+## Uninstalling / Removing
+
+### Remove the tool
 
 ```bash
-python3 musicorganise.py --path "/media/music/Organised" --action list --log-level DEBUG
+# If you cloned into a dedicated folder, just delete it:
+rm -rf /path/to/MusicDeduplicatorBetter
+
+# If you installed into a virtual environment:
+deactivate
+rm -rf .venv
 ```
 
-## Limitations and Considerations
+### Remove generated files only
 
-- **AcoustID API Rate Limits**: API calls are rate-limited to 3 per second per process. Be mindful of usage when processing large music libraries.
-- **System Resources**: Multiprocessing can consume significant CPU and memory resources. Adjust `batch_size` and consider disabling multiprocessing if needed.
-- **Metadata Dependence**: Accurate metadata enhances duplicate detection efficiency.
-- **File Permissions**: Ensure the script has the necessary read/write permissions for all files and directories involved.
-- **Backups**: Always back up your music library before performing operations that modify or delete files.
+```bash
+rm -f config.json file_cache.db music_deduplicate.log
+```
+
+### Uninstall Python dependencies
+
+```bash
+pip uninstall -r requirements.txt -y
+```
+
+---
 
 ## Troubleshooting
 
-- **Too Many Open Files Error**:
-  - Increase the open file limit.
-  - Reduce the `batch_size`.
-- **Missing Dependencies**:
-  - Verify that all Python libraries and system dependencies are correctly installed.
-  - Run `pip install -r requirements.txt` to install all Python dependencies.
-- **AcoustID Lookup Failures**:
-  - Ensure you have a valid AcoustID API key.
-  - Check your internet connection.
-  - Some files may be corrupt or unsupported; consider replacing them.
-- **Multiprocessing Issues**:
-  - Use `--no-multiprocessing` to disable multiprocessing for debugging.
+| Problem | Fix |
+|---------|-----|
+| `fpcalc: command not found` | Install `libchromaprint-tools` (Linux) or `chromaprint` (macOS/Homebrew). |
+| `AcoustID lookup failed` | Check your API key in `config.json`. Check your internet connection. |
+| `Too many open files` | Reduce `batch_size` in `config.json`. |
+| `No duplicates found` despite obvious duplicates | Ensure your files have valid metadata or that fpcalc can read them. Try `--log-level DEBUG`. |
+| TUI does not start | Make sure `textual>=0.47.0` is installed: `pip install textual`. |
+| Multiprocessing errors | Run with `--no-multiprocessing` or uncheck it in the TUI Settings. |
+
+---
+
+## Limitations
+
+- AcoustID API calls are rate-limited to **3 per second per process** to respect the API's terms of service.
+- Chromaprint cannot fingerprint DRM-protected or zero-length files; these are silently skipped.
+- Always **back up your music library** before running with `--action delete`.
+
+---
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a pull request or open an issue for any bugs or feature requests.
+Pull requests and issue reports are welcome.
+
+---
 
 ## License
 
-This project is licensed under the MIT License.
+MIT
 
-## Acknowledgments
-
-- **AcoustID**: For providing an open-source audio identification service.
-- **Mutagen**: For the powerful audio metadata handling library.
-- **FuzzyWuzzy**: For the fuzzy string matching library.
-- **tqdm**: For providing a simple and flexible progress bar utility.
-
-## Contact
-
-For any questions or support, please open an issue on the GitHub repository.
-
-**Note**: Always ensure you have backups of your music library before performing operations that modify or delete files.

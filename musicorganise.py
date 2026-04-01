@@ -14,6 +14,7 @@ from tqdm import tqdm
 from ratelimit import limits, sleep_and_retry
 import sqlite3
 import hashlib
+from typing import Callable, Optional
 
 # Configuration file and cache database file (anchored to script directory)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -113,6 +114,9 @@ def check_fpcalc():
 @limits(calls=3, period=1)
 def acoustid_lookup(api_key, fingerprint, duration):
     return acoustid.lookup(api_key, fingerprint, duration, meta='recordings artists')
+
+# Timeout (seconds) for fpcalc fingerprinting a single file
+FPCALC_TIMEOUT = 30
 
 # SQLite connection singleton
 _cache_conn = None
@@ -219,11 +223,29 @@ def get_acoustid(file_path, revalidate=False):
             return cached_acoustid
 
     try:
-        result = subprocess.run(['fpcalc', '-json', file_path], capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            ['fpcalc', '-json', file_path],
+            capture_output=True, text=True, check=True,
+            timeout=FPCALC_TIMEOUT,
+        )
         fingerprint_data = json.loads(result.stdout)
         duration = fingerprint_data['duration']
         fingerprint = fingerprint_data['fingerprint']
-        response = acoustid_lookup(ACOUSTID_API_KEY, fingerprint, duration)
+
+        # Retry up to 3 times for transient network errors
+        response = None
+        last_exc = None
+        for attempt in range(3):
+            try:
+                response = acoustid_lookup(ACOUSTID_API_KEY, fingerprint, duration)
+                break
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(2 ** attempt)
+        if response is None:
+            logging.warning(f"AcoustID lookup failed after 3 attempts for {file_path}: {last_exc}")
+            return None
+
         if response['status'] != 'ok':
             logging.warning(f"AcoustID lookup failed for {file_path}: {response.get('error', {}).get('message', 'Unknown error')}")
             return None
@@ -254,6 +276,9 @@ def get_acoustid(file_path, revalidate=False):
         update_cache(file_path, metadata, rid, cached_mtime)
         return rid
 
+    except subprocess.TimeoutExpired:
+        logging.error(f"AcoustID processing failed for {file_path}: fpcalc timed out after {FPCALC_TIMEOUT}s")
+        return None
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError,
             json.JSONDecodeError, KeyError) as e:
         logging.error(f"AcoustID processing failed for {file_path}: {e}")
@@ -311,8 +336,18 @@ def _calculate_hash_worker(dir_path):
         logging.error(f"Error processing directory {dir_path}: {e}")
         return None
 
-def find_duplicates(directory, verbose=False, use_multiprocessing=True, batch_size=1000):
-    """Finds duplicate directories based on content hashes."""
+def find_duplicates(directory, verbose=False, use_multiprocessing=True, batch_size=1000,
+                    progress_callback: Optional[Callable[[int, int, str], None]] = None):
+    """Finds duplicate directories based on content hashes.
+
+    Args:
+        directory: Root directory to scan.
+        verbose: Enable tqdm progress bars on the terminal.
+        use_multiprocessing: Use a worker pool for hash calculation.
+        batch_size: Number of directories per processing batch.
+        progress_callback: Optional callable ``(current, total, message)`` invoked
+            after each directory is processed.  Useful for TUI progress updates.
+    """
     dir_hashes = {}
     duplicates = []
     init_cache_db()
@@ -340,20 +375,46 @@ def find_duplicates(directory, verbose=False, use_multiprocessing=True, batch_si
         if use_multiprocessing:
             num_workers = min(cpu_count(), 2)  # Cap at 2 to respect API rate limits
             with Pool(processes=num_workers, initializer=_worker_init) as pool:
-                results = list(tqdm(
+                processed = 0
+                global_offset = batch_idx * batch_size
+                for result in tqdm(
                     pool.imap_unordered(_calculate_hash_worker, batch),
                     total=len(batch),
-                    desc=f"Scanning directories",
-                    disable=not verbose
-                ))
+                    desc="Scanning directories",
+                    disable=not verbose,
+                ):
+                    processed += 1
+                    dir_label = ""
+                    if result:
+                        dir_path, dir_hash, file_count = result
+                        dir_label = os.path.basename(dir_path) or dir_path
+                        if dir_hash:
+                            dir_hashes.setdefault(dir_hash, []).append(os.path.abspath(dir_path))
+                            summary_stats['total_files_processed'] += file_count
+                    if progress_callback:
+                        progress_callback(
+                            global_offset + processed,
+                            len(music_dirs),
+                            f"Scanned: {dir_label}" if dir_label else "Scanned directory",
+                        )
+            # results already accumulated above; skip the generic loop below
+            continue
         else:
             results = []
-            for dir_path in tqdm(batch, desc="Scanning directories", disable=not verbose):
+            for i, dir_path in enumerate(tqdm(batch, desc="Scanning directories", disable=not verbose)):
                 dir_hash = calculate_directory_hash(dir_path)
                 music_files = [f for f in os.listdir(dir_path)
                               if f.lower().endswith(tuple(SUPPORTED_EXTENSIONS))]
                 results.append((dir_path, dir_hash, len(music_files)))
+                if progress_callback:
+                    progress_callback(
+                        batch_idx * batch_size + i + 1,
+                        len(music_dirs),
+                        f"Scanned: {os.path.basename(dir_path) or dir_path}",
+                    )
 
+        # Results are only accumulated here for the non-multiprocessing path;
+        # the multiprocessing branch accumulates directly and uses `continue` above.
         for result in results:
             if result:
                 dir_path, dir_hash, file_count = result
@@ -370,9 +431,11 @@ def find_duplicates(directory, verbose=False, use_multiprocessing=True, batch_si
     return duplicates
 
 
-def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run):
+def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run,
+                       progress_callback: Optional[Callable[[int, int, str], None]] = None):
     """Resolves duplicates (list, move, delete) - directory-based and intra-directory."""
-    for duplicate_set in tqdm(duplicates, desc="Resolving duplicates", disable=not verbose):
+    total = len(duplicates)
+    for idx, duplicate_set in enumerate(tqdm(duplicates, desc="Resolving duplicates", disable=not verbose)):
         # 1. Determine the best directory to keep (prioritize FLAC and largest total size).
         best_dir = None
         best_dir_size = -1
@@ -489,6 +552,9 @@ def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run)
                     else:
                         acoustid_map[acoustid_rid] = file_path
 
+        if progress_callback:
+            progress_callback(idx + 1, total, f"Processed: {os.path.basename(best_dir) or best_dir}")
+
 
 
 def move_duplicates(dirs_to_remove, original_dir, move_dir, base_dir):
@@ -538,6 +604,16 @@ def display_summary():
         logging.info(f"  {format.upper()}: {count} files")
 
 def main():
+    # If called with no arguments, launch the interactive TUI.
+    if len(sys.argv) == 1:
+        try:
+            from music_tui import MusicDeduplicatorApp
+            app = MusicDeduplicatorApp()
+            app.run()
+            return
+        except ImportError:
+            pass  # Fall through to CLI if TUI module is unavailable
+
     parser = argparse.ArgumentParser(description="Music collection deduplication script.")
     parser.add_argument('-p', '--path', required=True, help="Path to the music directory.")
     parser.add_argument('-a', '--action', required=True, choices=['list', 'move', 'delete'], help="Action: list, move, or delete.")
