@@ -66,19 +66,17 @@ git clone https://github.com/19JVJeffery/MusicDeduplicatorBetter.git
 cd MusicDeduplicatorBetter
 ```
 
-### 3 — Install Python dependencies
+### 3 — Create a virtual environment and install Python dependencies
+
+Using a virtual environment is **strongly recommended** to avoid conflicts with system-managed Python packages (especially on macOS with Homebrew or on Ubuntu 23.04+):
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-> **Tip:** Use a virtual environment to keep dependencies isolated:
->
-> ```bash
-> python3 -m venv .venv
-> source .venv/bin/activate   # Windows: .venv\Scripts\activate
-> pip install -r requirements.txt
-> ```
+> **Note:** Remember to activate the virtual environment (`source .venv/bin/activate`) each time you open a new terminal before running the tool.
 
 ### 4 — Obtain an AcoustID API key
 
@@ -255,6 +253,8 @@ pip uninstall -r requirements.txt -y
 | `No duplicates found` despite obvious duplicates | Ensure your files have valid metadata or that fpcalc can read them. Try `--log-level DEBUG`. |
 | TUI does not start | Make sure `textual>=0.47.0` is installed: `pip install textual`. |
 | Multiprocessing errors | Run with `--no-multiprocessing` or uncheck it in the TUI Settings. |
+| `Cannot perform a --user install` error inside venv | Your shell has a global `PIP_USER=1` environment variable. Clear it before installing: `PIP_USER="" pip install -r requirements.txt` |
+| `pip install` fails with `externally-managed-environment` | You are on a system-managed Python (e.g. macOS Homebrew, Ubuntu 23.04+). Use a virtual environment as described in step 3 of installation. |
 
 ---
 
